@@ -6,6 +6,10 @@ SCRIPT_DIR="$(
     cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &&
     pwd
 )"
+PROJECT_DIR="$(
+    cd -- "$SCRIPT_DIR/.." &&
+    pwd
+)"
 # shellcheck source=cache_paths.sh
 source "$SCRIPT_DIR/cache_paths.sh"
 
@@ -29,6 +33,18 @@ if [[ ! -f "$wallpaper" ]]; then
 fi
 
 pkill mpvpaper 2>/dev/null || true
+if [[ ! -f "$(wallpaper_cache_dir)/live_mode" ]]; then
+    quickshell kill -p "$PROJECT_DIR/LiveWallpaper.qml" 2>/dev/null || true
+    pkill -9 -f "LiveWallpaper.qml" 2>/dev/null || true
+    pkill -9 -f "hypr_cursor_stream.py" 2>/dev/null || true
+else
+    live_info="$(cat "$(wallpaper_cache_dir)/live_mode" 2>/dev/null || true)"
+    live_mode_type="$(cut -d'|' -f1 <<< "$live_info")"
+    live_wall_path="$(cut -d'|' -f2- <<< "$live_info")"
+    if [[ -n "$live_wall_path" && -f "$live_wall_path" ]]; then
+        bash "$SCRIPT_DIR/apply_live_wallpaper.sh" "$live_mode_type" "$live_wall_path" >/dev/null 2>&1 &
+    fi
+fi
 
 if [[ "$wallpaper_type" == "video" ]]; then
     awww clear >/dev/null 2>&1 || true
@@ -45,6 +61,14 @@ else
         --transition-duration 0.4 \
         "$wallpaper" \
         >/dev/null 2>&1 || true
+fi
+
+if [[ -f "$SCRIPT_DIR/pywal_sync.py" ]]; then
+    python3 "$SCRIPT_DIR/pywal_sync.py" "$wallpaper" >/dev/null 2>&1 || true
+    kill -USR1 $(pidof kitty 2>/dev/null) 2>/dev/null || true
+    if command -v quickshell >/dev/null 2>&1 && pgrep -x quickshell >/dev/null 2>&1; then
+        quickshell ipc call pywal reload >/dev/null 2>&1 || true
+    fi
 fi
 
 ml4w_mode="${QS_WALLPAPER_ENABLE_ML4W:-0}"

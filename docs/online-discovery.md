@@ -180,8 +180,10 @@ Invalid values fail clearly rather than being silently corrected.
 | `XDG_CACHE_HOME` | `$HOME/.cache` | Base for all wallpaper-picker-owned cache state |
 | `QS_WALLPAPER_TARGET_WIDTH` | detected or `1920` | `1..16384`; must be paired with height |
 | `QS_WALLPAPER_TARGET_HEIGHT` | detected or `1080` | `1..16384`; must be paired with width |
-| `QS_WALLPAPER_RESULT_LIMIT` | `12` | `1..24`; not above candidate limit |
+| `QS_WALLPAPER_RESULT_LIMIT` | `24` | `1..24`; not above candidate limit |
 | `QS_WALLPAPER_CANDIDATE_LIMIT` | `72` | `3..72`; at least result limit |
+| `QS_WALLPAPER_CATEGORIES` | `111` | `3-bit` binary mask: General (100), Anime (010), People (001) |
+| `QS_WALLPAPER_PURITY` | `100` | `3-bit` binary mask: SFW (100), Sketchy (010), NSFW (001) |
 | `QS_WALLPAPER_SEARCH_JOBS` | `6` | `1..16` preview workers |
 | `QS_WALLPAPER_MIN_WIDTH` | target width | `1..16384` |
 | `QS_WALLPAPER_MIN_HEIGHT` | target height | `1..16384` |

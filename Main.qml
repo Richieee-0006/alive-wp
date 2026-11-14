@@ -1,14 +1,25 @@
 import QtQuick
 import QtQuick.Controls
 import Quickshell
+import Quickshell.Wayland
 import Quickshell.Io
 import "."
 
-FloatingWindow {
+PanelWindow {
     id: root
     visible: true
-    title: "wallpaper-picker"
     color: "transparent"
+
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+    WlrLayershell.namespace: "quickshell-wallpaper-picker"
+
+    anchors {
+        top: true
+        bottom: true
+        left: true
+        right: true
+    }
 
     property string onlineSearchScript: {
         let path = Qt.resolvedUrl("scripts/online_search.sh").toString()
@@ -31,9 +42,6 @@ FloatingWindow {
         }
     }
 
-    implicitWidth: Math.round(Screen.width * 0.94)
-    implicitHeight: Math.round(Screen.height * 0.30)
-
     Shortcut {
         sequence: "Escape"
         context: Qt.ApplicationShortcut
@@ -55,12 +63,33 @@ FloatingWindow {
         }
     }
 
-    WallpaperPicker {
-        id: picker
+    // Fullscreen dimmed backdrop
+    Rectangle {
+        id: backdrop
         anchors.fill: parent
-        focus: true
+        color: "#b00a0a0f"
 
-        onSearchQueryChanged: root.invalidateOnlineSearch()
+        MouseArea {
+            anchors.fill: parent
+            onClicked: Qt.quit()
+        }
+    }
+
+    // Centered carousel container
+    Item {
+        id: pickerContainer
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        height: Math.min(parent.height * 0.75, 580)
+
+        WallpaperPicker {
+            id: picker
+            anchors.fill: parent
+            focus: true
+
+            onSearchQueryChanged: root.invalidateOnlineSearch()
+        }
     }
 
     Rectangle {

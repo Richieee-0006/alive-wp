@@ -80,6 +80,26 @@ class FoundationTests(unittest.TestCase):
             wallpaper_search.normalize_query("  neon   city  "),
             "neon city",
         )
+        self.assertEqual(
+            wallpaper_search.normalize_query("https://wallhaven.cc/tag/3871"),
+            "id:3871",
+        )
+        self.assertEqual(
+            wallpaper_search.normalize_query("wallhaven.cc/tag/3871/"),
+            "id:3871",
+        )
+        self.assertEqual(
+            wallpaper_search.normalize_query("#3871"),
+            "id:3871",
+        )
+        self.assertEqual(
+            wallpaper_search.normalize_query("tag:3871"),
+            "id:3871",
+        )
+        self.assertEqual(
+            wallpaper_search.normalize_query("#the vampire diaries"),
+            "#the vampire diaries",
+        )
         with self.assertRaises(wallpaper_search.SearchError):
             wallpaper_search.normalize_query("   ")
         with self.assertRaises(wallpaper_search.SearchError):
@@ -230,6 +250,7 @@ class ConfigurationAndRequestTests(unittest.TestCase):
             query = parse_qs(parsed.query)
             total += int(query["per_page"][0])
             self.assertLessEqual(int(query["per_page"][0]), 24)
+            self.assertEqual(query["categories"], ["111"])
             self.assertEqual(query["purity"], ["100"])
             self.assertEqual(
                 query["q"],
@@ -254,6 +275,10 @@ class ConfigurationAndRequestTests(unittest.TestCase):
                 "QS_WALLPAPER_RESULT_LIMIT": "13",
                 "QS_WALLPAPER_CANDIDATE_LIMIT": "12",
             },
+            {"QS_WALLPAPER_CATEGORIES": "invalid"},
+            {"QS_WALLPAPER_CATEGORIES": "000"},
+            {"QS_WALLPAPER_PURITY": "invalid"},
+            {"QS_WALLPAPER_PURITY": "000"},
         ]
         for overrides in invalid_cases:
             env = base_env()

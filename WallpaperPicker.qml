@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Window
+import QtQuick.Effects
 import QtCore
 import Qt.labs.folderlistmodel
 import QtMultimedia
@@ -79,7 +80,7 @@ Item {
     // PROPERTIES & IPC RECEIVER
     // -------------------------------------------------------------------------
     property string widgetArg: ""
-    property string targetWallName: ""
+    property string targetWallName: Quickshell.env("QS_CURRENT_WALLPAPER")
     property bool initialFocusSet: false
     property int visibleItemCount: -1
     property int scrollAccum: 0
@@ -107,8 +108,8 @@ Item {
     property bool isApplying: false 
     
     // Reactive Status Properties
-    property bool isStartup: localFolderModel.status === FolderListModel.Loading || srcModel.status === FolderListModel.Loading
-    property bool isReady: visible && localFolderModel.status === FolderListModel.Ready
+    property bool isStartup: localFolderModel.status === FolderListModel.Loading
+    property bool isReady: visible && (localFolderModel.status === FolderListModel.Ready || localProxyModel.count > 0)
     property bool isSearchActive: false
     
     // Memory Properties for Search
@@ -122,6 +123,7 @@ Item {
 
     readonly property var filterData: [
         { name: "All", hex: "", label: "All" },
+        { name: "Saved", hex: "", label: "Saved" },
         { name: "Video", hex: "", label: "Vid" },
         { name: "Red", hex: "#FF4500", label: "" },
         { name: "Orange", hex: "#FFA500", label: "" },
@@ -201,10 +203,17 @@ Item {
                 fi
 
                 cp "$DEST_FILE" /tmp/lock_bg.png || true
+                mkdir -p "$HOME/.cache/wallpaper_picker"
+                printf '%s|%s\n' "image" "$DEST_FILE" > "$HOME/.cache/wallpaper_picker/last_wallpaper"
+                rm -f "$HOME/.cache/wallpaper_picker/live_mode" 2>/dev/null || true
+                quickshell kill -p "$(dirname "$RELOAD_SCRIPT")/../LiveWallpaper.qml" 2>/dev/null || true
+                pkill -9 -f "LiveWallpaper.qml" 2>/dev/null || true
+                pkill -9 -f "hypr_cursor_stream.py" 2>/dev/null || true
                 pkill mpvpaper || true
 
                 (
                     ENABLE_DYNAMIC_COLORS="${boolEnv(settings.enableDynamicColors)}" \
+                    ENABLE_PYWAL="${boolEnv(settings.enablePywal)}" \
                     ENABLE_MATUGEN="${boolEnv(settings.enableMatugen)}" \
                     ENABLE_HYPR_RELOAD="${boolEnv(settings.enableHyprReload)}" \
                     ENABLE_WAYBAR_RELOAD="${boolEnv(settings.enableWaybarReload)}" \
@@ -237,6 +246,127 @@ Item {
 
         Quickshell.execDetached(["bash", "-c", applyScript])
         window.requestClose()
+    }
+
+    // -------------------------------------------------------------------------
+    // LIVE WALLPAPER ACTIONS
+    // -------------------------------------------------------------------------
+    property var liveLayersMap: ({})
+    property var generatingWallpapers: ({})
+    property string activeLiveMode: "static"
+
+    Process {
+        id: liveIndexReader
+        command: ["cat", Quickshell.env("HOME") + "/.cache/wallpaper_picker/layers/index.json"]
+        running: true
+        stdout: StdioCollector {
+            onStreamFinished: {
+                let txt = this.text.trim();
+                if (txt !== "" && txt.startsWith("{")) {
+                    try {
+                        window.liveLayersMap = JSON.parse(txt);
+                    } catch (e) {
+                        console.warn("Failed to parse live layers index:", e);
+                    }
+                }
+            }
+        }
+    }
+
+    Process {
+        id: activeWallpaperReader
+        command: ["cat", Quickshell.env("HOME") + "/.cache/wallpaper_picker/last_wallpaper"]
+        running: true
+        stdout: StdioCollector {
+            onStreamFinished: {
+                let txt = this.text.trim();
+                let wallFile = "";
+                if (txt.includes("|")) {
+                    let parts = txt.split("|");
+                    if (parts.length >= 2) wallFile = parts[1];
+                } else if (txt !== "") {
+                    wallFile = txt;
+                }
+                if (wallFile !== "") {
+                    let clean = wallFile.split("/").pop();
+                    if (clean !== "") {
+                        window.targetWallName = clean;
+                        if (localProxyModel.count > 0) {
+                            window.tryFocus();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Process {
+        id: liveModeReader
+        command: ["cat", Quickshell.env("HOME") + "/.cache/wallpaper_picker/live_mode"]
+        running: true
+        stdout: StdioCollector {
+            onStreamFinished: {
+                let txt = this.text.trim();
+                if (txt.includes("|")) {
+                    let mode = txt.split("|")[0].trim();
+                    window.activeLiveMode = (mode === "live" || mode === "live_clock") ? mode : "static";
+                } else {
+                    window.activeLiveMode = "static";
+                }
+            }
+        }
+    }
+
+    Process {
+        id: liveGenProcess
+        property string targetFileName: ""
+        running: false
+        stdout: StdioCollector {
+            onStreamFinished: {
+                if (liveGenProcess.targetFileName !== "") {
+                    let genMap = Object.assign({}, window.generatingWallpapers);
+                    delete genMap[liveGenProcess.targetFileName];
+                    window.generatingWallpapers = genMap;
+                    liveGenProcess.targetFileName = "";
+                }
+                liveIndexReader.running = true;
+            }
+        }
+    }
+
+    function applyLiveWallpaperMode(mode, safeFileName) {
+        if (!safeFileName || window.isApplying || window.isDownloadingWallpaper || onlineDownloadProcess.running || liveGenProcess.running) {
+            return;
+        }
+        const realFileName = window.getSourceFileName(safeFileName, false);
+        const originalFile = window.srcDir + "/" + realFileName;
+        const script = window.resolveProjectScript("scripts/apply_live_wallpaper.sh");
+
+        window.isApplying = true;
+        window.activeLiveMode = mode;
+        window.targetWallName = realFileName;
+
+        Quickshell.execDetached(["bash", script, mode, originalFile]);
+        window.requestClose();
+    }
+
+    function generateLiveDepth(safeFileName) {
+        if (!safeFileName) return;
+        const realFileName = window.getSourceFileName(safeFileName, false);
+        if (liveGenProcess.running || window.generatingWallpapers[realFileName]) return;
+        const originalFile = window.srcDir + "/" + realFileName;
+        
+        let genMap = Object.assign({}, window.generatingWallpapers);
+        genMap[realFileName] = true;
+        window.generatingWallpapers = genMap;
+
+        liveGenProcess.command = [
+            "uv", "run",
+            window.resolveProjectScript("scripts/generate_layers.py"),
+            originalFile
+        ];
+        liveGenProcess.targetFileName = realFileName;
+        liveGenProcess.running = true;
     }
 
     // -------------------------------------------------------------------------
@@ -296,6 +426,7 @@ Item {
         if (isVideo) {
             wallpaperCmd = `
                 pkill mpvpaper || true
+                pkill hyprpaper || true
                 awww clear || true
                 swww clear || true
                 mpvpaper -o 'loop --no-audio --hwdec=auto --profile=high-quality --video-sync=display-resample --interpolation --tscale=oversample --panscan=1.0 --video-unscaled=no' '*' "$WALL_FILE" >/tmp/mpvpaper.log 2>&1 &
@@ -304,11 +435,17 @@ Item {
         } else {
             wallpaperCmd = `
                 pkill mpvpaper || true
+                pkill hyprpaper || true
+                if ! pgrep -x awww-daemon >/dev/null 2>&1; then
+                    awww-daemon &
+                    sleep 0.1
+                fi
                 TRANSITION="${window.pickTransition()}"
                 DURATION="${Number(settings.wallpaperTransitionDuration).toFixed(2)}"
                 FPS="${Math.max(1, Number(settings.wallpaperTransitionFps))}"
-                if ! awww img --transition-type "$TRANSITION" --transition-duration "$DURATION" --transition-fps "$FPS" "$WALL_FILE" >/dev/null 2>&1; then
-                    awww img --transition-type fade --transition-duration "$DURATION" --transition-fps "$FPS" "$WALL_FILE"
+                echo "Applying image: $WALL_FILE" >> /tmp/qs_apply.log
+                if ! awww img --transition-type "$TRANSITION" --transition-duration "$DURATION" --transition-fps "$FPS" "$WALL_FILE" >> /tmp/qs_apply.log 2>&1; then
+                    awww img --transition-type fade --transition-duration "$DURATION" --transition-fps "$FPS" "$WALL_FILE" >> /tmp/qs_apply.log 2>&1
                 fi
             `
             lockBgCmd = `cp "$WALL_FILE" /tmp/lock_bg.png`
@@ -316,12 +453,18 @@ Item {
 
         const fullScript = `
             (
+                export WAYLAND_DISPLAY="\${WAYLAND_DISPLAY:-wayland-1}"
+                export XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/run/user/1000}"
                 export WALL_FILE="${escOriginal}"
                 export THUMB_FILE="${escThumb}"
                 export RELOAD_SCRIPT="${escReload}"
 
                 mkdir -p "$HOME/.cache/wallpaper_picker"
                 printf '%s|%s\n' "${lastType}" "$WALL_FILE" > "$HOME/.cache/wallpaper_picker/last_wallpaper"
+                rm -f "$HOME/.cache/wallpaper_picker/live_mode" 2>/dev/null || true
+                quickshell kill -p "$(dirname "$RELOAD_SCRIPT")/../LiveWallpaper.qml" 2>/dev/null || true
+                pkill -9 -f "LiveWallpaper.qml" 2>/dev/null || true
+                pkill -9 -f "hypr_cursor_stream.py" 2>/dev/null || true
 
                 # Optional ML4W/Rofi synchronization.
                 (
@@ -350,6 +493,11 @@ Item {
                 echo "WALL_FILE=$WALL_FILE" > /tmp/qs_apply.log
                 ${lockBgCmd} || true
 
+                (
+                    ENABLE_DYNAMIC_COLORS="${boolEnv(settings.enableDynamicColors)}" ENABLE_PYWAL="${boolEnv(settings.enablePywal)}" ENABLE_MATUGEN="${boolEnv(settings.enableMatugen)}" ENABLE_HYPR_RELOAD="${boolEnv(settings.enableHyprReload)}" ENABLE_WAYBAR_RELOAD="${boolEnv(settings.enableWaybarReload)}" ENABLE_KITTY_RELOAD="${boolEnv(settings.enableKittyReload)}" ENABLE_CAVA_RELOAD="${boolEnv(settings.enableCavaReload)}" ENABLE_SWAYNC_RELOAD="${boolEnv(settings.enableSwayncReload)}" ENABLE_SWAYOSD_RELOAD="${boolEnv(settings.enableSwayosdReload)}" HYPR_COLORS_PATH="${escapeBash(settings.hyprColorsPath)}" WAYBAR_COLORS_PATH="${escapeBash(settings.waybarColorsPath)}" WAYBAR_LAUNCH_PATH="${escapeBash(settings.waybarLaunchPath)}" KITTY_SIGNAL_PROCESS="${escapeBash(settings.kittySignalProcess)}" EXTRA_RELOAD_COMMAND="${escapeBash(settings.extraReloadCommand)}" bash "$RELOAD_SCRIPT" "$( [ "${isVideo}" = "true" ] && echo "$THUMB_FILE" || echo "$WALL_FILE" )" || true
+                ) &
+                RELOAD_PID=$!
+
                 if [ "${isVideo}" = "true" ]; then
                     pkill mpvpaper || true
                     ${wallpaperCmd}
@@ -357,8 +505,7 @@ Item {
                     ${wallpaperCmd}
                 fi
 
-                sleep 1
-                ENABLE_DYNAMIC_COLORS="${boolEnv(settings.enableDynamicColors)}" ENABLE_MATUGEN="${boolEnv(settings.enableMatugen)}" ENABLE_HYPR_RELOAD="${boolEnv(settings.enableHyprReload)}" ENABLE_WAYBAR_RELOAD="${boolEnv(settings.enableWaybarReload)}" ENABLE_KITTY_RELOAD="${boolEnv(settings.enableKittyReload)}" ENABLE_CAVA_RELOAD="${boolEnv(settings.enableCavaReload)}" ENABLE_SWAYNC_RELOAD="${boolEnv(settings.enableSwayncReload)}" ENABLE_SWAYOSD_RELOAD="${boolEnv(settings.enableSwayosdReload)}" HYPR_COLORS_PATH="${escapeBash(settings.hyprColorsPath)}" WAYBAR_COLORS_PATH="${escapeBash(settings.waybarColorsPath)}" WAYBAR_LAUNCH_PATH="${escapeBash(settings.waybarLaunchPath)}" KITTY_SIGNAL_PROCESS="${escapeBash(settings.kittySignalProcess)}" EXTRA_RELOAD_COMMAND="${escapeBash(settings.extraReloadCommand)}" bash "$RELOAD_SCRIPT" "$( [ "${isVideo}" = "true" ] && echo "$THUMB_FILE" || echo "$WALL_FILE" )" || true
+                wait $RELOAD_PID
             ) >> /tmp/qs_apply.log 2>&1 & disown
         `
         Quickshell.execDetached(["bash", "-c", fullScript])
@@ -394,8 +541,7 @@ Item {
        }
    }
     // -------------------------------------------------------------------------
-    property bool isLoading: localFolderModel.status === FolderListModel.Loading || 
-                             srcModel.status === FolderListModel.Loading
+    property bool isLoading: localFolderModel.status === FolderListModel.Loading && localProxyModel.count === 0
 
     property bool showSpinner: window.isDownloadingWallpaper ||
                                window.isSearchingOnline ||
@@ -530,8 +676,6 @@ Item {
     }
 
     function tryFocus() {
-        if (initialFocusSet) return;
-
         if (localProxyModel.count > 0) {
             let foundIndex = -1;
             let cleanTarget = window.getCleanName(targetWallName);
@@ -539,15 +683,18 @@ Item {
             if (cleanTarget !== "") {
                 for (let i = 0; i < localProxyModel.count; i++) {
                     let fname = localProxyModel.get(i).fileName || "";
-                    if (window.getCleanName(fname) === cleanTarget) {
+                    if (window.getCleanName(fname) === cleanTarget || fname === cleanTarget || fname === targetWallName) {
                         foundIndex = i;
                         break;
                     }
                 }
             }
 
-            let finalIndex = foundIndex !== -1 ? foundIndex : 0;
-            window.executeFocusRestore(finalIndex, false, true);
+            if (foundIndex !== -1) {
+                window.executeFocusRestore(foundIndex, false, true);
+            } else if (!window.initialFocusSet) {
+                window.executeFocusRestore(0, false, true);
+            }
         }
     }
     
@@ -580,6 +727,10 @@ Item {
         
         if (!targetModel || targetModel.count === 0) {
             window.visibleItemCount = 0;
+            return;
+        }
+        if (window.currentFilter === "All") {
+            window.visibleItemCount = targetModel.count;
             return;
         }
         let count = 0;
@@ -618,7 +769,7 @@ Item {
         window.updateVisibleCount();
         window.applyFilters(true);
 
-        if (window.visibleItemCount === 0) {
+        if (window.visibleItemCount === 0 || window.searchQuery.startsWith("#") || window.searchQuery.startsWith("tag:") || window.searchQuery.startsWith("id:") || window.searchQuery.startsWith("http")) {
             window.triggerOnlineSearch(window.searchQuery);
         }
 
@@ -718,11 +869,18 @@ Item {
             (window.searchQuery || "").trim().toLowerCase();
 
         if (filter === "Search") {
-            return query === "" || cleanName.includes(query);
+            if (query === "") return true;
+            const searchable = cleanName.replace(/[_-]/g, " ");
+            const tokens = query.split(/\s+/).filter(t => t.length > 0);
+            return tokens.every(token => cleanName.includes(token) || searchable.includes(token));
         }
 
         if (filter === "All") {
             return true;
+        }
+
+        if (filter === "Saved") {
+            return cleanName.startsWith("wallhaven") || cleanName.includes("wallhaven");
         }
 
         if (filter === "Video") {
@@ -744,11 +902,15 @@ Item {
 
     FolderListModel {
         id: markerModel
-        folder: "file://" + Quickshell.env("HOME") + "/.cache/wallpaper_picker/colors_markers"
+        folder: (window.currentFilter !== "All" && window.currentFilter !== "Video" && window.currentFilter !== "Search")
+            ? "file://" + Quickshell.env("HOME") + "/.cache/wallpaper_picker/colors_markers"
+            : ""
         showDirs: false
         nameFilters: ["*_HEX_*"]
         
-        onCountChanged: window.processMarkers()
+        onCountChanged: {
+            if (status === FolderListModel.Ready) window.processMarkers()
+        }
         onStatusChanged: {
             if (status === FolderListModel.Ready) window.processMarkers()
         }
@@ -805,6 +967,66 @@ Item {
                 window.updateVisibleCount()
             }
         }
+    }
+
+    ListModel {
+        id: tagSuggestModel
+    }
+
+    Process {
+        id: tagSuggestProcess
+
+        stdout: StdioCollector {
+            onStreamFinished: {
+                window.applyTagSuggestions(this.text)
+            }
+        }
+    }
+
+    Timer {
+        id: tagSuggestTimer
+        interval: 180
+        repeat: false
+        onTriggered: {
+            if (window.currentFilter !== "Search") return
+            const q = searchInput.text.trim()
+            if (q.length < 2) {
+                tagSuggestModel.clear()
+                return
+            }
+            tagSuggestProcess.command = [
+                "python3",
+                window.resolveProjectScript("scripts/tag_suggest.py"),
+                q
+            ]
+            tagSuggestProcess.running = true
+        }
+    }
+
+    function applyTagSuggestions(text) {
+        tagSuggestModel.clear()
+        const lines = String(text || "").split("\n")
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim()
+            if (!line) continue
+            const sep = line.indexOf("|")
+            if (sep <= 0) continue
+            tagSuggestModel.append({
+                tagId: line.substring(0, sep).trim(),
+                tagName: line.substring(sep + 1).trim()
+            })
+        }
+        tagSuggestList.currentIndex = -1
+    }
+
+    function fillTagSuggestion(tagId, tagName) {
+        tagSuggestModel.clear()
+        if (tagSuggestList) {
+            tagSuggestList.currentIndex = -1
+        }
+        searchInput.text = "#" + tagName
+        searchInput.cursorPosition = searchInput.text.length
+        window.searchQuery = ("#" + tagName).toLowerCase()
     }
 
     function triggerOnlineSearch(query) {
@@ -924,6 +1146,10 @@ Item {
                 mv "$CSV" "$CSV.bak" 2>/dev/null
             fi
             
+            # Skip full scan if all markers are already present
+            missing=$(comm -23 <(ls -1 "$THUMBS" 2>/dev/null | sort) <(ls -1 "$COLOR_DIR" 2>/dev/null | sed -E "s/_HEX_[0-9a-fA-F]+$//" | sort) | head -n 1)
+            [ -z "$missing" ] && exit 0
+
             if command -v magick &> /dev/null; then CMD="magick"; else CMD="convert"; fi
             
             for file in "$THUMBS"/*; do
@@ -976,7 +1202,7 @@ Item {
             return;
         }
 
-        let filterOrder = ["All", "Video", "Red", "Orange", "Yellow", "Green", "Blue", "Purple", "Pink", "Monochrome"];
+        let filterOrder = ["All", "Saved", "Video", "Red", "Orange", "Yellow", "Green", "Blue", "Purple", "Pink", "Monochrome"];
         let currentFilterIdx = filterOrder.indexOf(window.currentFilter);
 
         if (currentFilterIdx === -1) {
@@ -1025,7 +1251,7 @@ Item {
             return;
         }
 
-        if (window.currentFilter === "Search") {
+        if (window.currentFilter === "Search" && window.isOnlineSearch) {
             window.updateVisibleCount();
             return; 
         }
@@ -1126,7 +1352,7 @@ Item {
         } 
     }
     
-    Shortcut { sequence: "Escape"; enabled: !window.isApplying; onActivated: { if (window.currentFilter === "Search") { window.currentFilter = "All"; } } }
+    Shortcut { sequence: "Escape"; enabled: !window.isApplying; onActivated: { searchInput.focus = false; if (window.currentFilter === "Search") { window.currentFilter = "All"; } Qt.quit(); } }
     Shortcut { sequence: "Tab"; enabled: !window.isApplying; onActivated: window.cycleFilter(1) }
     Shortcut { sequence: "Backtab"; enabled: !window.isApplying; onActivated: window.cycleFilter(-1) }
 
@@ -1144,7 +1370,9 @@ Item {
         showDirs: false
         sortField: FolderListModel.Name 
         
-        onCountChanged: window.syncLocalModel()
+        onCountChanged: {
+            if (status === FolderListModel.Ready) window.syncLocalModel()
+        }
         onStatusChanged: { if (status === FolderListModel.Ready) window.syncLocalModel() }
     }
 
@@ -1181,8 +1409,8 @@ Item {
         opacity: window.isReady ? 1.0 : 0.0
         anchors.margins: window.isReady ? 0 : window.s(40) 
         
-        Behavior on opacity { NumberAnimation { duration: window.anim(600); easing.type: Easing.OutQuart } }
-        Behavior on anchors.margins { NumberAnimation { duration: window.anim(700); easing.type: Easing.OutExpo } }
+        Behavior on opacity { NumberAnimation { duration: window.anim(150); easing.type: Easing.OutQuad } }
+        Behavior on anchors.margins { NumberAnimation { duration: window.anim(150); easing.type: Easing.OutQuad } }
 
         spacing: 0
         orientation: ListView.Horizontal
@@ -1275,6 +1503,16 @@ Item {
             readonly property bool isVideo: safeFileName.startsWith("000_")
             readonly property bool matchesFilter: window.checkItemMatchesFilter(safeFileName, isVideo, window.cacheVersion, window.currentFilter)
             
+            readonly property string sourceFileName: window.getSourceFileName(safeFileName, isVideo)
+            readonly property string sourceFullPath: window.srcDir + "/" + sourceFileName
+            readonly property bool hasLiveLayer: Boolean(
+                (window.liveLayersMap[sourceFileName + ":fg"] && window.liveLayersMap[sourceFileName + ":bg"]) ||
+                (window.liveLayersMap[sourceFullPath + ":fg"] && window.liveLayersMap[sourceFullPath + ":bg"])
+            )
+            readonly property bool isGeneratingLive: Boolean(window.generatingWallpapers[sourceFileName])
+            readonly property bool isActiveCard: window.targetWallName !== "" && (safeFileName === window.targetWallName || sourceFileName === window.targetWallName)
+            readonly property string cardActiveMode: isActiveCard ? window.activeLiveMode : ""
+            
             readonly property real targetWidth: isVisuallyEnlarged ? (window.itemWidth * 1.5) : (window.itemWidth * 0.5)
             readonly property real targetHeight: isVisuallyEnlarged ? (window.itemHeight + window.s(30)) : window.itemHeight 
             
@@ -1288,7 +1526,6 @@ Item {
                 onTriggered: {
                     if (delegateRoot.isVisuallyEnlarged && delegateRoot.isVideo) {
                         delegateRoot.isPlayingVideo = true;
-                        previewPlayer.play();
                     }
                 }
             }
@@ -1297,7 +1534,6 @@ Item {
                 if (!isVisuallyEnlarged) {
                     isPlayingVideo = false;
                     videoPlayTimer.stop();
-                    previewPlayer.stop();
                 }
             }
             
@@ -1366,12 +1602,14 @@ Item {
                 }
 
                 Item {
+                    id: cardImageContainer
                     anchors.fill: parent
                     anchors.margins: window.borderWidth 
                     Rectangle { anchors.fill: parent; color: "black" }
                     clip: true
 
                     Image {
+                        id: wallpaperImg
                         anchors.centerIn: parent
                         anchors.horizontalCenterOffset: window.s(-50) 
                         width: (window.itemWidth * 1.5) + ((window.itemHeight + window.s(30)) * Math.abs(window.skewFactor)) + window.s(50)
@@ -1386,37 +1624,43 @@ Item {
                         }
                     }
                     
-                    MediaPlayer {
-                        id: previewPlayer
-                        source: delegateRoot.isPlayingVideo
-                            ? "file://" + window.srcDir + "/" +
-                              window.getSourceFileName(
-                                  delegateRoot.safeFileName,
-                                  true
-                              )
-                            : ""
-                        audioOutput: AudioOutput { muted: true }
-                        videoOutput: previewOutput
-                        loops: MediaPlayer.Infinite
-                    }
+                    Loader {
+                        id: videoPlayerLoader
+                        anchors.fill: parent
+                        active: delegateRoot.isVideo && delegateRoot.isPlayingVideo
+                        sourceComponent: Item {
+                            anchors.fill: parent
+                            MediaPlayer {
+                                id: previewPlayer
+                                source: "file://" + window.srcDir + "/" +
+                                    window.getSourceFileName(
+                                        delegateRoot.safeFileName,
+                                        true
+                                    )
+                                audioOutput: AudioOutput { muted: true }
+                                videoOutput: previewOutput
+                                loops: MediaPlayer.Infinite
+                                Component.onCompleted: play()
+                            }
 
-                    VideoOutput {
-                        id: previewOutput
-                        anchors.centerIn: parent
-                        anchors.horizontalCenterOffset: window.s(-50) 
-                        width: (window.itemWidth * 1.5) + ((window.itemHeight + window.s(30)) * Math.abs(window.skewFactor)) + window.s(50)
-                        height: window.itemHeight + window.s(30)
-                        fillMode: VideoOutput.PreserveAspectCrop
-                        visible: delegateRoot.isPlayingVideo && previewPlayer.playbackState === MediaPlayer.PlayingState
+                            VideoOutput {
+                                id: previewOutput
+                                anchors.centerIn: parent
+                                anchors.horizontalCenterOffset: window.s(-50) 
+                                width: (window.itemWidth * 1.5) + ((window.itemHeight + window.s(30)) * Math.abs(window.skewFactor)) + window.s(50)
+                                height: window.itemHeight + window.s(30)
+                                fillMode: VideoOutput.PreserveAspectCrop
 
-                        transform: Matrix4x4 {
-                            property real s: -window.skewFactor
-                            matrix: Qt.matrix4x4(1, s, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
+                                transform: Matrix4x4 {
+                                    property real s: -window.skewFactor
+                                    matrix: Qt.matrix4x4(1, s, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
+                                }
+                            }
                         }
                     }
                     
                     Rectangle {
-                        visible: delegateRoot.isVideo && (!delegateRoot.isPlayingVideo || previewPlayer.playbackState !== MediaPlayer.PlayingState)
+                        visible: delegateRoot.isVideo && !delegateRoot.isPlayingVideo
                         anchors.bottom: parent.bottom
                         anchors.horizontalCenter: parent.horizontalCenter
                         anchors.margins: window.s(10)
@@ -1445,6 +1689,303 @@ Item {
                                 ctx.lineTo(s(4), s(16));
                                 ctx.closePath();
                                 ctx.fill();
+                            }
+                        }
+                    }
+
+                    // -----------------------------------------------------------------
+                    // LIVE ACTION FROSTED GLASS OVERLAY (BOTTOM 1/3)
+                    // -----------------------------------------------------------------
+                    Item {
+                        id: liveActionSection
+                        visible: !delegateRoot.isVideo && delegateRoot.isVisuallyEnlarged && !(window.currentFilter === "Search" && window.isOnlineSearch)
+                        anchors.bottom: parent.bottom
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        height: parent.height / 3
+                        clip: true
+
+                        // Hover detector for bottom 1/3 (HoverHandler does not lose hover to child MouseAreas)
+                        HoverHandler {
+                            id: liveActionHover
+                        }
+
+                        // Fallback click on bottom 1/3 when not hovering action buttons
+                        TapHandler {
+                            enabled: !liveActionHover.hovered
+                            onTapped: {
+                                delegateRoot.pressScale = 0.94
+                                clickPulseReset.start()
+                                view.currentIndex = index
+                                window.applyWallpaper(delegateRoot.safeFileName, delegateRoot.isVideo)
+                            }
+                        }
+
+                        // Frosted glass + actions (visible ONLY when hovering bottom 1/3)
+                        Item {
+                            id: visualOverlay
+                            anchors.fill: parent
+                            opacity: liveActionHover.hovered ? 1.0 : 0.0
+
+                            Behavior on opacity {
+                                NumberAnimation {
+                                    duration: 200
+                                    easing.type: Easing.OutCubic
+                                }
+                            }
+
+                            // 1. Genuine frosted glass blur of the underlying wallpaper
+                            MultiEffect {
+                                x: 0
+                                y: -cardImageContainer.height * (2 / 3)
+                                width: cardImageContainer.width
+                                height: cardImageContainer.height
+                                source: wallpaperImg
+                                blurEnabled: true
+                                blur: 0.95
+                                blurMax: 48
+                                saturation: 0.25
+                                brightness: -0.15
+                            }
+
+                            // 2. Delicate translucent sheen & subtle top boundary line
+                            Rectangle {
+                                anchors.fill: parent
+                                color: Qt.rgba(0.05, 0.06, 0.09, 0.35)
+
+                                Rectangle {
+                                    anchors.top: parent.top
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    height: 1
+                                    color: Qt.rgba(1, 1, 1, 0.15)
+                                }
+                            }
+
+                            // 3. Unskewed container for minimal text action buttons
+                            Item {
+                                id: buttonContainer
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                height: window.s(32)
+
+                                transform: Matrix4x4 {
+                                    property real s: -window.skewFactor
+                                    matrix: Qt.matrix4x4(1, s, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
+                                }
+
+                                // Slide-up animation on hover
+                                y: liveActionHover.hovered
+                                    ? (parent.height - height) / 2
+                                    : parent.height + window.s(10)
+
+                                Behavior on y {
+                                    NumberAnimation {
+                                        duration: 220
+                                        easing.type: Easing.OutCubic
+                                    }
+                                }
+
+                                // State A: Not generated yet -> Static | Vytvořit Live
+                                Row {
+                                    visible: !delegateRoot.hasLiveLayer
+                                    anchors.centerIn: parent
+                                    spacing: window.s(18)
+
+                                    Item {
+                                        width: staticBtnTextA.implicitWidth + window.s(16)
+                                        height: parent.height
+                                        anchors.verticalCenter: parent.verticalCenter
+
+                                        HoverHandler {
+                                            id: staticHoverA
+                                            cursorShape: Qt.PointingHandCursor
+                                        }
+
+                                        TapHandler {
+                                            enabled: liveActionHover.hovered
+                                            onTapped: {
+                                                window.applyWallpaper(delegateRoot.safeFileName, delegateRoot.isVideo)
+                                            }
+                                        }
+
+                                        Text {
+                                            id: staticBtnTextA
+                                            anchors.centerIn: parent
+                                            text: "Static"
+                                            color: delegateRoot.cardActiveMode === "static" ? _theme.blue : (staticHoverA.hovered ? "#ffffff" : Qt.rgba(1, 1, 1, 0.78))
+                                            font.family: "Inter"
+                                            font.pixelSize: window.s(13)
+                                            font.weight: Font.DemiBold
+
+                                            Behavior on color {
+                                                ColorAnimation { duration: 140 }
+                                            }
+                                        }
+                                    }
+
+                                    // Subtle Divider
+                                    Rectangle {
+                                        width: 1
+                                        height: window.s(14)
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        color: Qt.rgba(1, 1, 1, 0.22)
+                                    }
+
+                                    Item {
+                                        width: genBtnText.implicitWidth + window.s(16)
+                                        height: parent.height
+                                        anchors.verticalCenter: parent.verticalCenter
+
+                                        HoverHandler {
+                                            id: genHover
+                                            cursorShape: delegateRoot.isGeneratingLive ? Qt.ArrowCursor : Qt.PointingHandCursor
+                                        }
+
+                                        TapHandler {
+                                            enabled: liveActionHover.hovered && !delegateRoot.isGeneratingLive
+                                            onTapped: {
+                                                window.generateLiveDepth(delegateRoot.sourceFileName)
+                                            }
+                                        }
+
+                                        Text {
+                                            id: genBtnText
+                                            anchors.centerIn: parent
+                                            text: delegateRoot.isGeneratingLive ? "Generuji vrstvy..." : "Vytvořit Live"
+                                            color: genHover.hovered ? "#ffffff" : Qt.rgba(1, 1, 1, 0.78)
+                                            font.family: "Inter"
+                                            font.pixelSize: window.s(13)
+                                            font.weight: Font.DemiBold
+
+                                            Behavior on color {
+                                                ColorAnimation { duration: 140 }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // State B: Generated -> Static | Live | Live Clock
+                                Row {
+                                    visible: delegateRoot.hasLiveLayer
+                                    anchors.centerIn: parent
+                                    spacing: window.s(18)
+
+                                    // Button 0: Static
+                                    Item {
+                                        width: staticBtnTextB.implicitWidth + window.s(16)
+                                        height: parent.height
+                                        anchors.verticalCenter: parent.verticalCenter
+
+                                        HoverHandler {
+                                            id: staticHoverB
+                                            cursorShape: Qt.PointingHandCursor
+                                        }
+
+                                        TapHandler {
+                                            enabled: liveActionHover.hovered
+                                            onTapped: {
+                                                window.applyWallpaper(delegateRoot.safeFileName, delegateRoot.isVideo)
+                                            }
+                                        }
+
+                                        Text {
+                                            id: staticBtnTextB
+                                            anchors.centerIn: parent
+                                            text: "Static"
+                                            color: delegateRoot.cardActiveMode === "static" ? _theme.blue : (staticHoverB.hovered ? "#ffffff" : Qt.rgba(1, 1, 1, 0.78))
+                                            font.family: "Inter"
+                                            font.pixelSize: window.s(13)
+                                            font.weight: Font.DemiBold
+
+                                            Behavior on color {
+                                                ColorAnimation { duration: 140 }
+                                            }
+                                        }
+                                    }
+
+                                    // Subtle Divider 1
+                                    Rectangle {
+                                        width: 1
+                                        height: window.s(14)
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        color: Qt.rgba(1, 1, 1, 0.22)
+                                    }
+
+                                    // Button 1: Live
+                                    Item {
+                                        width: liveBtnText.implicitWidth + window.s(16)
+                                        height: parent.height
+                                        anchors.verticalCenter: parent.verticalCenter
+
+                                        HoverHandler {
+                                            id: liveHover
+                                            cursorShape: Qt.PointingHandCursor
+                                        }
+
+                                        TapHandler {
+                                            enabled: liveActionHover.hovered
+                                            onTapped: {
+                                                window.applyLiveWallpaperMode("live", delegateRoot.sourceFileName)
+                                            }
+                                        }
+
+                                        Text {
+                                            id: liveBtnText
+                                            anchors.centerIn: parent
+                                            text: "Live"
+                                            color: delegateRoot.cardActiveMode === "live" ? _theme.blue : (liveHover.hovered ? "#ffffff" : Qt.rgba(1, 1, 1, 0.78))
+                                            font.family: "Inter"
+                                            font.pixelSize: window.s(13)
+                                            font.weight: Font.DemiBold
+
+                                            Behavior on color {
+                                                ColorAnimation { duration: 140 }
+                                            }
+                                        }
+                                    }
+
+                                    // Subtle Divider 2
+                                    Rectangle {
+                                        width: 1
+                                        height: window.s(14)
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        color: Qt.rgba(1, 1, 1, 0.22)
+                                    }
+
+                                    // Button 2: Live Clock
+                                    Item {
+                                        width: clockBtnText.implicitWidth + window.s(16)
+                                        height: parent.height
+                                        anchors.verticalCenter: parent.verticalCenter
+
+                                        HoverHandler {
+                                            id: clockHover
+                                            cursorShape: Qt.PointingHandCursor
+                                        }
+
+                                        TapHandler {
+                                            enabled: liveActionHover.hovered
+                                            onTapped: {
+                                                window.applyLiveWallpaperMode("live_clock", delegateRoot.sourceFileName)
+                                            }
+                                        }
+
+                                        Text {
+                                            id: clockBtnText
+                                            anchors.centerIn: parent
+                                            text: "Live Clock"
+                                            color: delegateRoot.cardActiveMode === "live_clock" ? _theme.blue : (clockHover.hovered ? "#ffffff" : Qt.rgba(1, 1, 1, 0.78))
+                                            font.family: "Inter"
+                                            font.pixelSize: window.s(13)
+                                            font.weight: Font.DemiBold
+
+                                            Behavior on color {
+                                                ColorAnimation { duration: 140 }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1729,6 +2270,70 @@ Item {
                     font.pixelSize: window.s(16) 
                     clip: true
                     
+                    Keys.priority: Keys.BeforeItem
+
+                    Keys.onDownPressed: (event) => {
+                        if (tagSuggestModel.count > 0) {
+                            if (tagSuggestList.currentIndex < 0) {
+                                tagSuggestList.currentIndex = 0
+                            } else {
+                                tagSuggestList.currentIndex = (tagSuggestList.currentIndex + 1) % tagSuggestModel.count
+                            }
+                            tagSuggestList.positionViewAtIndex(tagSuggestList.currentIndex, ListView.Contain)
+                            event.accepted = true
+                        }
+                    }
+
+                    Keys.onUpPressed: (event) => {
+                        if (tagSuggestModel.count > 0) {
+                            if (tagSuggestList.currentIndex <= 0) {
+                                tagSuggestList.currentIndex = tagSuggestModel.count - 1
+                            } else {
+                                tagSuggestList.currentIndex = tagSuggestList.currentIndex - 1
+                            }
+                            tagSuggestList.positionViewAtIndex(tagSuggestList.currentIndex, ListView.Contain)
+                            event.accepted = true
+                        }
+                    }
+
+                    Keys.onRightPressed: (event) => {
+                        if (tagSuggestModel.count > 0 && searchInput.cursorPosition >= searchInput.text.length) {
+                            const idx = (tagSuggestList.currentIndex >= 0 && tagSuggestList.currentIndex < tagSuggestModel.count) ? tagSuggestList.currentIndex : 0
+                            const item = tagSuggestModel.get(idx)
+                            window.fillTagSuggestion(item.tagId, item.tagName)
+                            event.accepted = true
+                            return
+                        }
+                        event.accepted = false
+                    }
+
+                    Keys.onReturnPressed: (event) => {
+                        if (tagSuggestModel.count > 0 && tagSuggestList.currentIndex >= 0 && tagSuggestList.currentIndex < tagSuggestModel.count) {
+                            const item = tagSuggestModel.get(tagSuggestList.currentIndex)
+                            window.fillTagSuggestion(item.tagId, item.tagName)
+                            event.accepted = true
+                            return
+                        }
+                        event.accepted = false
+                    }
+
+                    Keys.onEnterPressed: (event) => {
+                        if (tagSuggestModel.count > 0 && tagSuggestList.currentIndex >= 0 && tagSuggestList.currentIndex < tagSuggestModel.count) {
+                            const item = tagSuggestModel.get(tagSuggestList.currentIndex)
+                            window.fillTagSuggestion(item.tagId, item.tagName)
+                            event.accepted = true
+                            return
+                        }
+                        event.accepted = false
+                    }
+
+                    Keys.onEscapePressed: (event) => {
+                        searchInput.focus = false
+                        tagSuggestModel.clear()
+                        event.accepted = true
+                        Qt.quit()
+                    }
+
                     onTextEdited: {
                         if (window.isSearchingOnline) {
                             onlineSearchProcess.running = false
@@ -1744,6 +2349,12 @@ Item {
                         window.onlineSearchError = ""
                         window.searchQuery = text.trim().toLowerCase()
 
+                        if (text.trim().length >= 2) {
+                            tagSuggestTimer.restart()
+                        } else {
+                            tagSuggestModel.clear()
+                        }
+
                         window.currentFilter = "Search"
                         window.hasSearched = true
                         window.isOnlineSearch = false
@@ -1758,12 +2369,107 @@ Item {
                     }
                     
                     onAccepted: {
-                        window.triggerLocalSearch();
-                        searchInput.focus = false; 
-                        view.forceActiveFocus();
+                        if (tagSuggestModel.count > 0 && tagSuggestList.currentIndex >= 0 && tagSuggestList.currentIndex < tagSuggestModel.count) {
+                            const item = tagSuggestModel.get(tagSuggestList.currentIndex)
+                            window.fillTagSuggestion(item.tagId, item.tagName)
+                            return
+                        }
+                        tagSuggestModel.clear()
+                        window.triggerLocalSearch()
+                        searchInput.focus = false 
+                        view.forceActiveFocus()
                     }
                 }
 
+            }
+        }
+
+        Rectangle {
+            id: tagSuggestPopup
+            anchors.bottom: parent.top
+            anchors.bottomMargin: window.s(8)
+            anchors.right: parent.right
+            anchors.rightMargin: window.s(6)
+            width: window.s(360)
+            height: Math.min(tagSuggestModel.count, 6) * window.s(34) + window.s(8)
+            radius: window.s(10)
+            clip: true
+            z: 30
+
+            visible: opacity > 0
+            opacity: (window.currentFilter === "Search" && searchInput.activeFocus && tagSuggestModel.count > 0 && searchInput.text.trim().length >= 2) ? 1.0 : 0.0
+            Behavior on opacity { NumberAnimation { duration: window.anim(150); easing.type: Easing.OutQuad } }
+
+            color: Qt.rgba(_theme.mantle.r, _theme.mantle.g, _theme.mantle.b, 0.95)
+            border.color: Qt.rgba(_theme.surface2.r, _theme.surface2.g, _theme.surface2.b, 0.8)
+            border.width: 1
+
+            ListView {
+                id: tagSuggestList
+                anchors.fill: parent
+                anchors.margins: window.s(4)
+                model: tagSuggestModel
+                clip: true
+                spacing: window.s(2)
+                currentIndex: -1
+
+                delegate: Rectangle {
+                    id: tagItemDelegate
+                    width: tagSuggestList.width
+                    height: window.s(32)
+                    radius: window.s(6)
+                    color: (tagSuggestList.currentIndex === index || itemMouse.containsMouse) ? Qt.rgba(_theme.surface2.r, _theme.surface2.g, _theme.surface2.b, 0.75) : "transparent"
+                    border.color: (tagSuggestList.currentIndex === index) ? Qt.rgba(_theme.text.r, _theme.text.g, _theme.text.b, 0.3) : "transparent"
+                    border.width: 1
+
+                    MouseArea {
+                        id: itemMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: window.fillTagSuggestion(model.tagId, model.tagName)
+                    }
+
+                    Item {
+                        anchors.fill: parent
+                        anchors.leftMargin: window.s(10)
+                        anchors.rightMargin: window.s(10)
+
+                        Text {
+                            id: hashText
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "#"
+                            color: Qt.rgba(_theme.text.r, _theme.text.g, _theme.text.b, 0.4)
+                            font.family: "JetBrains Mono"
+                            font.pixelSize: window.s(12)
+                            font.bold: true
+                        }
+
+                        Text {
+                            id: tagIdText
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: model.tagId
+                            color: Qt.rgba(_theme.text.r, _theme.text.g, _theme.text.b, 0.3)
+                            font.family: "JetBrains Mono"
+                            font.pixelSize: window.s(11)
+                        }
+
+                        Text {
+                            anchors.left: hashText.right
+                            anchors.leftMargin: window.s(6)
+                            anchors.right: tagIdText.left
+                            anchors.rightMargin: window.s(8)
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: model.tagName
+                            color: _theme.text
+                            font.family: "JetBrains Mono"
+                            font.pixelSize: window.s(13)
+                            elide: Text.ElideRight
+                        }
+                    }
+                }
             }
         }
     }
@@ -1785,6 +2491,7 @@ Item {
     }
 
     Component.onDestruction: {
+        searchInput.focus = false;
         if (window.hasSearched) {
             searchState.query = searchInput.text;
             searchState.searched = window.hasSearched;

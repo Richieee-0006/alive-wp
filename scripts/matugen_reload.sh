@@ -4,7 +4,8 @@ set -u
 WALL="${1:-}"
 LOG="/tmp/matugen-reload.log"
 
-ENABLE_DYNAMIC_COLORS="${ENABLE_DYNAMIC_COLORS:-0}"
+ENABLE_DYNAMIC_COLORS="${ENABLE_DYNAMIC_COLORS:-1}"
+ENABLE_PYWAL="${ENABLE_PYWAL:-1}"
 ENABLE_MATUGEN="${ENABLE_MATUGEN:-0}"
 ENABLE_HYPR_RELOAD="${ENABLE_HYPR_RELOAD:-0}"
 ENABLE_WAYBAR_RELOAD="${ENABLE_WAYBAR_RELOAD:-0}"
@@ -30,12 +31,23 @@ before_waybar="$(grep -m1 '@define-color source_color' "$WAYBAR_COLORS_PATH" 2>/
 echo "BEFORE HYPR:   $before_hypr" >> "$LOG"
 echo "BEFORE WAYBAR: $before_waybar" >> "$LOG"
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ "$ENABLE_PYWAL" = "1" ] && [ -n "$WALL" ]; then
+    echo "Running pywal_sync.py for $WALL" >> "$LOG"
+    python3 "$SCRIPT_DIR/pywal_sync.py" "$WALL" >> "$LOG" 2>&1 || true
+    if command -v quickshell >/dev/null 2>&1 && pgrep -x quickshell >/dev/null 2>&1; then
+        quickshell ipc call pywal reload >/dev/null 2>&1 || true
+    fi
+fi
+
 if [ "$ENABLE_DYNAMIC_COLORS" = "1" ] && [ "$ENABLE_MATUGEN" = "1" ] && command -v matugen >/dev/null 2>&1 && [ -n "$WALL" ] && [ -f "$WALL" ]; then
     matugen image "$WALL" >/tmp/matugen-run.log 2>&1 || true
 fi
 
-if [ "$ENABLE_KITTY_RELOAD" = "1" ]; then
+if [ "$ENABLE_KITTY_RELOAD" = "1" ] || [ "$ENABLE_PYWAL" = "1" ]; then
     killall -USR1 "$KITTY_SIGNAL_PROCESS" 2>/dev/null || true
+    kill -USR1 $(pidof kitty 2>/dev/null) 2>/dev/null || true
 fi
 
 if [ "$ENABLE_CAVA_RELOAD" = "1" ] && pgrep -x cava >/dev/null; then

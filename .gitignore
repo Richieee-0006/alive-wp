@@ -5,3 +5,5 @@ __pycache__/
 *.pyc
 *~
 *.before-*
+*.bak*
+.pytest_cache/

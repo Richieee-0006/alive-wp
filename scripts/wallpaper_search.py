@@ -33,13 +33,15 @@ USER_AGENT = "qs-wallpaper-picker/3.0"
 MAX_QUERY_LENGTH = 160
 DEFAULT_WIDTH = 1920
 DEFAULT_HEIGHT = 1080
-DEFAULT_RESULT_LIMIT = 12
+DEFAULT_RESULT_LIMIT = 24
 DEFAULT_CANDIDATE_LIMIT = 72
 DEFAULT_JOBS = 6
 DEFAULT_CONNECT_TIMEOUT = 8.0
 DEFAULT_TOTAL_TIMEOUT = 30.0
 DEFAULT_RETRIES = 1
 DEFAULT_MAX_RATIO_ERROR = 0.20
+DEFAULT_CATEGORIES = "111"
+DEFAULT_PURITY = "100"
 MAX_RESULT_LIMIT = 24
 MAX_CANDIDATE_LIMIT = 72
 MAX_JOBS = 16
@@ -49,6 +51,14 @@ FULL_IMAGE_HOSTS = frozenset({"w.wallhaven.cc"})
 PREVIEW_HOSTS = frozenset({"th.wallhaven.cc"})
 ALLOWED_IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 ID_PATTERN = re.compile(r"^[A-Za-z0-9]{2,32}$")
+TAG_URL_PATTERN = re.compile(
+    r"^(?:https?://)?(?:www\.)?wallhaven\.cc/tag/(?P<id>[0-9]+)/?$",
+    re.IGNORECASE,
+)
+TAG_ID_PREFIX_PATTERN = re.compile(
+    r"^(?:#|tag[:/]|id:)(?P<id>[0-9]+)$",
+    re.IGNORECASE,
+)
 
 STRATEGIES = (
     ("relevance", "relevance", None),
@@ -92,6 +102,8 @@ class RuntimeConfig:
     connect_timeout: float
     total_timeout: float
     retries: int
+    categories: str = DEFAULT_CATEGORIES
+    purity: str = DEFAULT_PURITY
 
 
 @dataclass(frozen=True)
@@ -184,6 +196,15 @@ def normalize_query(raw: str) -> str:
         raise SearchError(
             f"Search query exceeds the {MAX_QUERY_LENGTH}-character limit."
         )
+
+    url_match = TAG_URL_PATTERN.match(query)
+    if url_match:
+        return f"id:{url_match.group('id')}"
+
+    id_match = TAG_ID_PREFIX_PATTERN.match(query)
+    if id_match:
+        return f"id:{id_match.group('id')}"
+
     return query
 
 
@@ -413,6 +434,16 @@ def load_runtime_config(
         minimum=0,
         maximum=3,
     )
+    categories = str(values.get("QS_WALLPAPER_CATEGORIES") or DEFAULT_CATEGORIES).strip()
+    if not re.fullmatch(r"[01]{3}", categories) or categories == "000":
+        raise SearchError(
+            "QS_WALLPAPER_CATEGORIES must be a 3-bit binary string (e.g. '111')."
+        )
+    purity = str(values.get("QS_WALLPAPER_PURITY") or DEFAULT_PURITY).strip()
+    if not re.fullmatch(r"[01]{3}", purity) or purity == "000":
+        raise SearchError(
+            "QS_WALLPAPER_PURITY must be a 3-bit binary string (e.g. '100')."
+        )
 
     return RuntimeConfig(
         target_width=width,
@@ -426,6 +457,8 @@ def load_runtime_config(
         connect_timeout=connect_timeout,
         total_timeout=total_timeout,
         retries=retries,
+        categories=categories,
+        purity=purity,
     )
 
 
@@ -614,7 +647,8 @@ def build_strategy_requests(
     ):
         params = {
             "q": query,
-            "purity": "100",
+            "categories": config.categories,
+            "purity": config.purity,
             "sorting": sorting,
             "order": "desc",
             "per_page": str(per_page),
