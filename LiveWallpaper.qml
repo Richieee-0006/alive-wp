@@ -18,11 +18,12 @@ ShellRoot {
     property real clockDepth: 0.45
     property real maxDisplacement: 0.038
 
-    // Ambient breathing drift (gentle continuous living motion)
+    // Ambient breathing drift (gentle continuous living motion on empty workspace)
+    property bool workspaceEmpty: true
     property real ambientTime: 0.0
     Timer {
         interval: 16
-        running: true
+        running: rootShell.workspaceEmpty
         repeat: true
         onTriggered: rootShell.ambientTime += 0.016
     }
@@ -80,12 +81,21 @@ ShellRoot {
         stdout: SplitParser {
             splitMarker: "\n"
             onRead: data => {
-                let parts = data.trim().split(",")
+                let line = data.trim()
+                if (line === "OCCUPIED") {
+                    rootShell.workspaceEmpty = false
+                    rootShell.currentOffsetX = 0.0
+                    rootShell.currentOffsetY = 0.0
+                    return
+                }
+                let parts = line.split(",")
                 if (parts.length === 2) {
+                    rootShell.workspaceEmpty = true
                     let cx = parseFloat(parts[0].trim())
                     let cy = parseFloat(parts[1].trim())
-                    let scrW = liveWindow.width > 0 ? liveWindow.width : 1920
-                    let scrH = liveWindow.height > 0 ? liveWindow.height : 1080
+                    let scr = Quickshell.screens.length > 0 ? Quickshell.screens[0] : null
+                    let scrW = (scr && scr.width > 0) ? scr.width : 1920
+                    let scrH = (scr && scr.height > 0) ? scr.height : 1080
                     if (!isNaN(cx) && !isNaN(cy)) {
                         rootShell.currentOffsetX = (cx / scrW) - 0.5
                         rootShell.currentOffsetY = (cy / scrH) - 0.5
